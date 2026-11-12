@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>IPL Auction Game</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+        font-family: 'Segoe UI', Arial, sans-serif;
+      }
+      body {
+        background: linear-gradient(135deg, #0f172a, #1e1b4b);
+        color: #fff;
+        min-height: 100vh;
+      }
+      .wrap {
+        max-width: 1000px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      h1 {
+        text-align: center;
+        font-size: 2.2rem;
+        margin: 20px 0;
+        color: #fbbf24;
+      }
+      h2 {
+        margin: 10px 0;
+      }
+      h3 {
+        margin: 8px 0;
+      }
+      .card {
+        background: #1e293b;
+        border: 1px solid #334155;
+        border-radius: 14px;
+        padding: 20px;
+        margin: 12px 0;
+      }
+      .center {
+        text-align: center;
+      }
+      .inp {
+        background: #0f172a;
+        border: 1px solid #475569;
+        color: #fff;
+        border-radius: 10px;
+        padding: 12px;
+        font-size: 1rem;
+        width: 100%;
+        margin: 8px 0;
+      }
+      .btn {
+        background: linear-gradient(90deg, #f97316, #fbbf24);
+        color: #0f172a;
+        font-weight: 700;
+        border: none;
+        border-radius: 10px;
+        padding: 12px 22px;
+        font-size: 1rem;
+        cursor: pointer;
+        margin: 6px 4px;
+      }
+      .btn:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      .btn.blue {
+        background: #3b82f6;
+        color: #fff;
+      }
+      .btn.red {
+        background: #ef4444;
+        color: #fff;
+      }
+      .btn.green {
+        background: #22c55e;
+        color: #fff;
+      }
+      .btn.big {
+        font-size: 1.3rem;
+        padding: 14px 30px;
+      }
+      .row {
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+      .half {
+        flex: 1;
+        min-width: 250px;
+      }
+      label {
+        color: #cbd5e1;
+        font-size: 0.9rem;
+      }
+      .small {
+        color: #94a3b8;
+        font-size: 0.85rem;
+      }
+      .wait {
+        color: #94a3b8;
+        margin-top: 10px;
+      }
+      .topbar {
+        text-align: center;
+        background: #1e293b;
+        border-radius: 10px;
+        padding: 10px;
+        margin-bottom: 10px;
+      }
+      .codebox {
+        background: #fbbf24;
+        color: #0f172a;
+        padding: 4px 14px;
+        border-radius: 8px;
+      }
+      .mrow {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 8px 12px;
+        background: #0f172a;
+        border-radius: 8px;
+        margin: 6px 0;
+        flex-wrap: wrap;
+      }
+      .role {
+        padding: 3px 10px;
+        border-radius: 20px;
+        font-size: 0.75rem;
+        font-weight: 700;
+        color: #fff;
+      }
+      .pname {
+        font-size: 2rem;
+        margin: 8px 0;
+      }
+      .timer {
+        font-size: 3rem;
+        font-weight: 800;
+        margin: 10px 0;
+      }
+      .bar {
+        height: 8px;
+        background: #334155;
+        border-radius: 6px;
+      }
+      .bar div {
+        height: 8px;
+        background: #22c55e;
+        border-radius: 6px;
+        transition: width 1s linear;
+      }
+      .bid {
+        font-size: 1.3rem;
+        margin: 10px 0;
+        color: #fbbf24;
+        font-weight: 700;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+        gap: 10px;
+        margin: 10px 0;
+      }
+      .pcard {
+        background: #0f172a;
+        border: 2px solid #334155;
+        border-radius: 10px;
+        padding: 10px;
+        cursor: pointer;
+      }
+      .pcard.sel {
+        border-color: #22c55e;
+        background: #14532d;
+      }
+      .rtmcard {
+        border: 2px solid #ef4444;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script>
+      const socket = io();
+      let selfId = null,
+        room = null,
+        view = 'home';
+      let xiPick = [],
+        impactPick = null,
+        lastPhase = null;
+      const ROLES = {
+        BAT: 'Batsman',
+        WK: 'Wicket-Keeper',
+        BOWL: 'Bowler',
+        AR: 'All-Rounder',
+      };
+      const RCOL = {
+        BAT: '#3b82f6',
+        WK: '#22c55e',
+        BOWL: '#ef4444',
+        AR: '#a855f7',
+      };
+
+      socket.on('joined', function (d) {
+        selfId = d.self;
+        view = 'room';
+        render();
+      });
+      socket.on('room', function (r) {
+        room = r;
+        if (room.phase !== lastPhase) {
+          if (room.phase === 'xi') {
+            xiPick = [];
+            impactPick = null;
+          }
+          lastPhase = room.phase;
+        }
+        if (view === 'room') render();
+      });
+      socket.on('err', function (m) {
+        alert(m);
+      });
+
+      function val(id) {
+        return document.getElementById(id).value;
+      }
+      function me() {
+        return room.members.find(function (m) {
+          return m.id === selfId;
+        });
+      }
+      function isHost() {
+        const m = me();
+        return m && m.isHost;
+      }
+      function overseasCount() {
+        const sq = me().squad;
+        return xiPick.filter(function (n) {
+          return sq.find(function (p) {
+            return p.name === n;
+          }).overseas;
+        }).length;
+      }
+
+      function doCreate() {
+        socket.emit('create', { name: val('name'), purse: val('purse') });
+      }
+      function doJoin() {
+        socket.emit('join', { code: val('code'), name: val('name') });
+      }
+      function doCat() {
+        socket.emit('category', { role: val('role'), over: val('over') });
+      }
+      function doXi() {
+        socket.emit('xi', { xi: xiPick, impact: impactPick });
+      }
+      function toggleXi(i) {
+        const n = me().squad[i].name;
+        if (xiPick.includes(n))
+          xiPick = xiPick.filter(function (x) {
+            return x !== n;
+          });
+        else if (xiPick.length < 11) xiPick.push(n);
+        if (impactPick === n) impactPick = null;
+        render();
+      }
+
+      function render() {
+        const app = document.getElementById('app');
+        if (view === 'home' || !room) {
+          app.innerHTML = homeHTML();
+          return;
+        }
+        let h =
+          '<div class="wrap"><h1>🏏 IPL AUCTION GAME</h1>' +
+          '<div class="topbar">Room: <b>' +
+          room.code +
+          '</b> | Purse: ₹' +
+          room.purse +
+          ' Cr</div>';
+        if (room.phase === 'lobby') h += lobbyHTML();
+        else if (room.phase === 'catPick') h += catHTML(false);
+        else if (room.phase === 'auction') h += auctionHTML();
+        else if (room.phase === 'rtm') h += rtmHTML();
+        else if (room.phase === 'catEnd') h += catHTML(true);
+        else if (room.phase === 'xi') h += xiHTML();
+        else if (room.phase === 'results') h += resHTML();
+        h += '</div>';
+        app.innerHTML = h;
+      }
+
+      function homeHTML() {
+        return (
+          '<div class="wrap"><h1>🏏 IPL AUCTION GAME</h1>' +
+          '<div class="card"><label>Apna Naam</label><input id="name" class="inp" placeholder="e.g. Golu">' +
+          '<div class="row"><div class="half"><label>Purse Chunao</label>' +
+          '<select id="purse" class="inp"><option value="50">₹50 Cr</option><option value="100" selected>₹100 Cr</option><option value="150">₹150 Cr</option></select>' +
+          '<button class="btn" onclick="doCreate()">➕ Create Room</button></div>' +
+          '<div class="half"><label>Room Code</label><input id="code" class="inp" placeholder="IPL-XXXX">' +
+          '<button class="btn blue" onclick="doJoin()">🚪 Join Room</button></div></div></div></div>'
+        );
+      }
+
+      function membersHTML() {
+        let h = '<div class="card"><h3>👥 Teams</h3>';
+        room.members.forEach(function (m) {
+          h +=
+            '<div class="mrow"><span>' +
+            (m.isHost ? '👑 ' : '') +
+            m.name +
+            (m.id === selfId ? ' (YOU)' : '') +
+            '</span><span>₹' +
+            m.purse +
+            ' Cr | ' +
+            m.squad.length +
+            '/25 players | RTM: ' +
+            m.rtm +
+            '</span></div>';
+        });
+        return h + '</div>';
+      }
+
+      function soldHTML() {
+        if (!room.soldLog.length) return '';
+        let h = '<div class="card"><h3>🧾 Recent Sales</h3>';
+        room.soldLog
+          .slice()
+          .reverse()
+          .forEach(function (s) {
+            h +=
+              '<div class="mrow"><span>' +
+              s.name +
+              '</span><span>' +
+              (s.team === 'UNSOLD'
+                ? '❌ UNSOLD'
+                : s.team + ' — ₹' + s.amount + ' Cr') +
+              '</span></div>';
+          });
+        return h + '</div>';
+      }
+
+      function lobbyHTML() {
+        let h =
+          '<div class="card center"><h2>Room Code: <span class="codebox">' +
+          room.code +
+          '</span></h2>' +
+          '<p>Ye code apne doston ko bhejo! (Min 2, Max 10 players)</p></div>' +
+          membersHTML();
+        if (isHost())
+          h +=
+            '<div class="card center"><button class="btn green big" ' +
+            (room.members.length < 2 ? 'disabled' : '') +
+            ' onclick="socket.emit(\'start\')">🚀 Start Auction</button></div>';
+        else
+          h +=
+            '<div class="card center"><p class="wait">⏳ Host ke start karne ka intezar karein...</p></div>';
+        return h;
+      }
+
+      function catHTML(isEnd) {
+        let h =
+          '<div class="card"><h2>' +
+          (isEnd
+            ? '✅ Category khatam! Agli category chuno'
+            : '🎯 Auction Category Chuno') +
+          '</h2>';
+        if (isHost()) {
+          h +=
+            '<select id="role" class="inp"><option value="ALL">All Roles</option><option value="BAT">Batsman</option><option value="WK">Wicket-Keeper</option><option value="AR">All-Rounder</option><option value="BOWL">Bowler</option></select>' +
+            '<select id="over" class="inp"><option value="ALL">Indian + Overseas</option><option value="IND">Sirf Indian</option><option value="OVER">Sirf Overseas</option></select>' +
+            '<button class="btn" onclick="doCat()">🔨 Start Category</button>' +
+            (isEnd
+              ? '<button class="btn red" onclick="socket.emit(\'endAuction\')">🏁 End Auction & Build XI</button>'
+              : '');
+        } else h += '<p class="wait">⏳ Host category chun raha hai...</p>';
+        return h + '</div>' + membersHTML();
+      }
+
+      function auctionHTML() {
+        const p = room.current;
+        const next = room.bidder
+          ? Math.round((room.bid.amount + 0.25) * 100) / 100
+          : p.base;
+        let h =
+          '<div class="card center"><p class="small">Queue mein bache: ' +
+          room.queueLeft +
+          ' players</p>' +
+          '<h2 class="pname">' +
+          p.name +
+          '</h2>' +
+          '<p>' +
+          p.country +
+          ' &nbsp;<span class="role" style="background:' +
+          RCOL[p.role] +
+          '">' +
+          ROLES[p.role] +
+          '</span></p>' +
+          '<div class="timer">' +
+          room.timeLeft +
+          's</div>' +
+          '<div class="bar"><div style="width:' +
+          (room.timeLeft / 15) * 100 +
+          '%"></div></div>' +
+          '<p class="bid">Current Bid: ₹' +
+          room.bid.amount +
+          ' Cr ' +
+          (room.bidderName ? '(' + room.bidderName + ')' : '(base price)') +
+          '</p>' +
+          '<button class="btn big" onclick="socket.emit(\'bid\')">🔨 Bid ₹' +
+          next +
+          ' Cr</button></div>' +
+          (isHost()
+            ? '<br><button class="btn red" onclick="socket.emit(\'stopCat\')">⏭️ Stop Category</button>'
+            : '') +
+          '</div>' +
+          soldHTML() +
+          membersHTML();
+        return h;
+      }
+
+      function rtmHTML() {
+        const w = room.rtmWindow;
+        const m = me();
+        let h =
+          '<div class="card center rtmcard"><h2>⚡ RTM WINDOW (' +
+          w.timeLeft +
+          's)</h2>' +
+          '<p>' +
+          w.playerName +
+          ' ko <b>' +
+          w.buyerName +
+          '</b> ₹' +
+          w.amount +
+          ' Cr mein mil raha tha...</p>';
+        if (w.rtmBuyer) h += '<p class="bid">RTM use ho gaya!</p>';
+        else if (
+          m &&
+          m.id !== w.buyerId &&
+          m.rtm > 0 &&
+          m.purse >= w.amount &&
+          m.squad.length < 25
+        )
+          h +=
+            '<button class="btn red big" onclick="socket.emit(\'rtm\')">🎯 Use RTM (₹' +
+            w.amount +
+            ' Cr)</button>';
+        else h += '<p class="wait">⏳ Intezar karein...</p>';
+        h += '</div>' + membersHTML();
+        return h;
+      }
+
+      function xiHTML() {
+        const m = me();
+        if (m.xi)
+          return (
+            '<div class="card center"><h2>✅ Aapki XI submit ho chuki hai!</h2><p class="wait">⏳ Sabke submit karne ka intezar...</p></div>' +
+            membersHTML()
+          );
+        if (m.squad.length < 11)
+          return (
+            '<div class="card center"><h2>😅 Aapke paas 11 players nahi hain!</h2><p class="wait">Aap result mein count nahi honge.</p></div>' +
+            membersHTML()
+          );
+        let h =
+          '<div class="card"><h2>🎽 Apni Playing XI Banao</h2>' +
+          '<p>Chune gaye: ' +
+          xiPick.length +
+          '/11 | XI mein overseas: ' +
+          overseasCount() +
+          '/4</p>' +
+          '<div class="grid">';
+        m.squad.forEach(function (p, i) {
+          const sel = xiPick.includes(p.name);
+          h +=
+            '<div class="pcard ' +
+            (sel ? 'sel' : '') +
+            '" onclick="toggleXi(' +
+            i +
+            ')"><b>' +
+            p.name +
+            '</b><br><span class="role" style="background:' +
+            RCOL[p.role] +
+            '">' +
+            p.role +
+            '</span> <span class="small">' +
+            (p.overseas ? '🌍' : '🇮🇳') +
+            ' R' +
+            p.rating +
+            '</span></div>';
+        });
+        h +=
+          '</div><label>Impact Player (XI se bahar):</label><select id="impact" class="inp" onchange="impactPick=this.value"><option value="">-- chuno --</option>';
+        m.squad.forEach(function (p) {
+          if (!xiPick.includes(p.name))
+            h +=
+              '<option value="' +
+              p.name +
+              '"' +
+              (impactPick === p.name ? ' selected' : '') +
+              '>' +
+              p.name +
+              '</option>';
+        });
+        h +=
+          '</select><div class="center"><button class="btn green big" onclick="doXi()">✅ Submit XI</button></div></div>';
+        return h;
+      }
+
+      function resHTML() {
+        let h = '<div class="card center"><h2>🏆 FINAL RESULTS</h2></div>';
+        room.results.forEach(function (r, i) {
+          const medal =
+            i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : i + 1 + '.';
+          h +=
+            '<div class="card"><h2>' +
+            medal +
+            ' ' +
+            r.name +
+            ' — ' +
+            r.score +
+            ' pts</h2>' +
+            '<p class="small">Impact Player: ' +
+            r.impact +
+            '</p>' +
+            '<p class="small">XI: ' +
+            r.xi.join(', ') +
+            '</p></div>';
+        });
+        return h;
+      }
+
+      render();
+    </script>
+  </body>
+</html>
