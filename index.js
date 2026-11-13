@@ -301,10 +301,7 @@ io.on('connection', (socket) => {
     }
     broadcast(room);
   });
-  if (Object.values(room.members).every((mm) => mm.squad.length < 11)) {
-    room.results = [];
-    room.phase = 'results';
-  }
+
 
   socket.on('xi', (data) => {
     const room = rooms[socket.room];
