@@ -7,363 +7,350 @@ const PLAYERS = require('./players.js');
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
+
 app.use(express.static(path.join(__dirname, 'public')));
+app.get('/ping', (req, res) => res.send('pong'));
 
 const rooms = {};
-const BID_TIME = 15;
-const RTM_TIME = 10;
-const r2 = (x) => Math.round(x * 100) / 100;
 
-function newCode() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let c = '';
-  for (let i = 0; i < 4; i++)
-    c += chars[Math.floor(Math.random() * chars.length)];
-  return 'IPL-' + c;
+function shuffle(a) {
+  const arr = a.slice();
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+  }
+  return arr;
 }
 
-function pub(room) {
-  return {
-    code: room.code,
-    purse: room.purse,
-    phase: room.phase,
-    category: room.category,
-    queueLeft: room.queue.length,
-    current: room.current,
-    bid: room.bid,
-    bidderName: room.bidder ? room.members[room.bidder].name : null,
-    timeLeft: room.timeLeft,
-    rtmWindow: room.rtmWindow,
-    soldLog: room.soldLog.slice(-8),
-    results: room.results,
-    members: Object.entries(room.members).map(([id, m]) => ({
-      id,
-      name: m.name,
-      purse: m.purse,
-      rtm: m.rtm,
-      squad: m.squad,
-      xi: m.xi,
-      isHost: id === room.host,
-    })),
-  };
+function makeCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let c = 'IPL-';
+  for (let i = 0; i < 4; i++) c += chars[Math.floor(Math.random() * chars.length)];
+  if (rooms[c]) return makeCode();
+  return c;
 }
 
 function broadcast(room) {
-  io.to(room.code).emit('room', pub(room));
-}
-function stopTimer(room) {
-  if (room.timer) {
-    clearInterval(room.timer);
-    room.timer = null;
-  }
+  io.to(room.code).emit('room', room);
 }
 
-function canBuy(room, id, player, amount) {
-  const m = room.members[id];
-  if (!m) return 'Member nahi mila';
-  if (m.squad.length >= 25) return 'Max 25 players ho sakte hain!';
-  if (player.overseas && m.squad.filter((p) => p.overseas).length >= 8)
-    return 'Max 8 overseas players!';
-  if (amount > m.purse) return 'Purse mein paise nahi hain!';
+function findMember(room, id) {
+  for (let i = 0; i < room.members.length; i++) {
+    if (room.members[i].id === id) return room.members[i];
+  }
   return null;
 }
 
-function startBidTimer(room) {
-  stopTimer(room);
-  room.timeLeft = BID_TIME;
-  broadcast(room);
-  room.timer = setInterval(() => {
-    room.timeLeft--;
-    if (room.timeLeft <= 0) sellPlayer(room);
-    else broadcast(room);
-  }, 1000);
-}
-
-function nextPlayer(room) {
-  room.current = null;
-  room.bid = null;
+function present(room) {
+  if (!room.queue || room.queue.length === 0) {
+    room.current = null;
+    room.phase = 'catEnd';
+    broadcast(room);
+    return;
+  }
+  const p = room.queue.shift();
+  room.used[p.name] = true;
+  room.current = p;
+  room.queueLeft = room.queue.length;
+  room.bid = { amount: p.base };
   room.bidder = null;
-  if (room.queue.length === 0) {
-    room.phase = 'catEnd';
-    broadcast(room);
-    return;
-  }
-  room.current = room.queue.shift();
-  room.bid = { amount: room.current.base };
+  room.bidderName = null;
+  room.timeLeft = 15;
   room.phase = 'auction';
-  startBidTimer(room);
+  broadcast(room);
 }
 
-function sellPlayer(room) {
-  stopTimer(room);
-  const player = room.current;
-  if (!room.bidder) {
-    room.soldLog.push({ name: player.name, team: 'UNSOLD', amount: 0 });
-    nextPlayer(room);
-    return;
-  }
-  const amount = room.bid.amount;
-  const candidates = Object.keys(room.members).filter(
-    (id) =>
-      id !== room.bidder &&
-      room.members[id].rtm > 0 &&
-      canBuy(room, id, player, amount) === null
-  );
-  if (candidates.length > 0) {
-    room.phase = 'rtm';
-    room.rtmWindow = {
-      playerName: player.name,
-      amount,
-      buyerId: room.bidder,
-      buyerName: room.members[room.bidder].name,
-      timeLeft: RTM_TIME,
-      rtmBuyer: null,
-    };
-    broadcast(room);
-    room.timer = setInterval(() => {
-      room.rtmWindow.timeLeft--;
-      if (room.rtmWindow.timeLeft <= 0) finishSale(room);
-      else broadcast(room);
-    }, 1000);
-  } else finishSale(room);
-}
-
-function finishSale(room) {
-  stopTimer(room);
-  let player, amount, buyer;
-  if (room.rtmWindow) {
-    player =
-      PLAYERS.find((p) => p.name === room.rtmWindow.playerName) || room.current;
-    amount = room.rtmWindow.amount;
-    buyer = room.rtmWindow.rtmBuyer || room.rtmWindow.buyerId;
-    if (room.rtmWindow.rtmBuyer) room.members[room.rtmWindow.rtmBuyer].rtm--;
-    room.rtmWindow = null;
+function finalizeSale(room) {
+  const w = room.rtmWindow;
+  const p = w.player;
+  const buyerId = w.rtmBuyerId || w.buyerId;
+  if (buyerId) {
+    const m = findMember(room, buyerId);
+    if (m && m.purse >= w.amount && m.squad.length < 25) {
+      m.purse = Math.round((m.purse - w.amount) * 100) / 100;
+      m.squad.push(p);
+      room.soldLog.push({ name: p.name, team: m.name, amount: w.amount });
+    } else {
+      room.soldLog.push({ name: p.name, team: 'UNSOLD', amount: 0 });
+    }
   } else {
-    player = room.current;
-    amount = room.bid.amount;
-    buyer = room.bidder;
+    room.soldLog.push({ name: p.name, team: 'UNSOLD', amount: 0 });
   }
-  const m = room.members[buyer];
-  m.purse = r2(m.purse - amount);
-  m.squad.push(player);
-  room.soldLog.push({ name: player.name, team: m.name, amount });
-  room.phase = 'auction';
-  nextPlayer(room);
+  room.rtmWindow = null;
+  present(room);
 }
 
-io.on('connection', (socket) => {
-  socket.on('create', (data) => {
-    const name = (data.name || '').trim();
-    if (!name) return socket.emit('err', 'Pehle apna naam likho!');
-    const purse = Number(data.purse) || 100;
-    const code = newCode();
-    rooms[code] = {
-      code,
-      host: socket.id,
-      purse,
-      members: { [socket.id]: { name, purse, rtm: 2, squad: [], xi: null } },
-      phase: 'lobby',
-      queue: [],
-      current: null,
-      bid: null,
-      bidder: null,
-      timer: null,
-      timeLeft: 0,
-      category: null,
-      soldLog: [],
-      rtmWindow: null,
-      results: null,
-    };
-    socket.room = code;
-    socket.join(code);
-    socket.emit('joined', { code, self: socket.id });
-    broadcast(rooms[code]);
-  });
-
-  socket.on('join', (data) => {
-    const name = (data.name || '').trim();
-    if (!name) return socket.emit('err', 'Pehle apna naam likho!');
-    const room = rooms[(data.code || '').trim().toUpperCase()];
-    if (!room) return socket.emit('err', 'Room code galat hai!');
-    if (room.phase !== 'lobby')
-      return socket.emit('err', 'Auction shuru ho chuka hai!');
-    if (Object.keys(room.members).length >= 10)
-      return socket.emit('err', 'Room full hai (max 10)!');
-    room.members[socket.id] = {
-      name,
-      purse: room.purse,
-      rtm: 2,
-      squad: [],
-      xi: null,
-    };
-    socket.room = room.code;
-    socket.join(room.code);
-    socket.emit('joined', { code: room.code, self: socket.id });
-    broadcast(room);
-  });
-
-  socket.on('start', () => {
-    const room = rooms[socket.room];
-    if (!room || socket.id !== room.host) return;
-    if (Object.keys(room.members).length < 2)
-      return socket.emit('err', 'Kam se kam 2 members chahiye!');
-    room.phase = 'catPick';
-    broadcast(room);
-  });
-
-  socket.on('category', (f) => {
-    const room = rooms[socket.room];
-    if (!room || socket.id !== room.host) return;
-    if (room.phase !== 'catPick' && room.phase !== 'catEnd') return;
-    const sold = new Set();
-    Object.values(room.members).forEach((m) =>
-      m.squad.forEach((p) => sold.add(p.name))
-    );
-    room.soldLog.forEach((s) => sold.add(s.name));
-    let list = PLAYERS.filter((p) => !sold.has(p.name));
-    if (f.role && f.role !== 'ALL')
-      list = list.filter((p) => p.role === f.role);
-    if (f.over === 'IND') list = list.filter((p) => !p.overseas);
-    if (f.over === 'OVER') list = list.filter((p) => p.overseas);
-    for (let i = list.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      const t = list[i];
-      list[i] = list[j];
-      list[j] = t;
-    }
-    if (list.length === 0)
-      return socket.emit('err', 'Is category mein koi player bacha nahi!');
-    room.queue = list;
-    room.category = f;
-    nextPlayer(room);
-  });
-
-  socket.on('bid', () => {
-    const room = rooms[socket.room];
-    if (!room || room.phase !== 'auction' || !room.current) return;
-    const amount = room.bidder ? r2(room.bid.amount + 0.25) : room.current.base;
-    const err = canBuy(room, socket.id, room.current, amount);
-    if (err) return socket.emit('err', err);
-    room.bid = { amount };
-    room.bidder = socket.id;
-    startBidTimer(room);
-  });
-
-  socket.on('rtm', () => {
-    const room = rooms[socket.room];
-    if (!room || room.phase !== 'rtm' || !room.rtmWindow) return;
-    const w = room.rtmWindow;
-    if (socket.id === w.buyerId) return;
-    const m = room.members[socket.id];
-    if (!m || m.rtm <= 0 || w.rtmBuyer) return;
-    const player = PLAYERS.find((p) => p.name === w.playerName);
-    if (canBuy(room, socket.id, player, w.amount)) return;
-    w.rtmBuyer = socket.id;
-    finishSale(room);
-  });
-  socket.on('stopCat', () => {
-    const room = rooms[socket.room];
-    if (!room || socket.id !== room.host) return;
-    if (room.phase !== 'auction' && room.phase !== 'rtm') return;
-    stopTimer(room);
-    room.rtmWindow = null;
-    room.current = null;
-    room.bid = null;
-    room.bidder = null;
-    room.phase = 'catEnd';
-    broadcast(room);
-  });
-  socket.on('stopCat', () => {
-    const room = rooms[socket.room];
-    if (!room || socket.id !== room.host) return;
-    if (room.phase !== 'auction' && room.phase !== 'rtm') return;
-    stopTimer(room);
-    room.rtmWindow = null;
-    room.current = null;
-    room.bid = null;
-    room.bidder = null;
-    room.phase = 'catEnd';
-    broadcast(room);
-  });
-  socket.on('endAuction', () => {
-    const room = rooms[socket.room];
-    if (!room || socket.id !== room.host) return;
-    stopTimer(room);
-    room.rtmWindow = null;
-    room.current = null;
-    room.bid = null;
-    room.bidder = null;
-    room.queue = [];
-    room.phase = 'xi';
-    if (Object.values(room.members).every((mm) => mm.squad.length < 11)) {
-      room.results = [];
-      room.phase = 'results';
-    }
-    broadcast(room);
-  });
-
-
-  socket.on('xi', (data) => {
-    const room = rooms[socket.room];
-    if (!room || room.phase !== 'xi') return;
-    const m = room.members[socket.id];
-    const squadNames = m.squad.map((p) => p.name);
-    const xi = data.xi || [];
-    if (xi.length !== 11)
-      return socket.emit('err', 'Playing XI mein exactly 11 players chahiye!');
-    if (new Set(xi).size !== 11)
-      return socket.emit('err', 'Ek player do baar nahi chun sakte!');
-    for (const n of xi)
-      if (!squadNames.includes(n))
-        return socket.emit('err', n + ' aapki squad mein nahi hai!');
-    const xiP = xi.map((n) => m.squad.find((p) => p.name === n));
-    if (xiP.filter((p) => p.overseas).length > 4)
-      return socket.emit('err', 'XI mein max 4 overseas players!');
-    if (!xiP.some((p) => p.role === 'WK'))
-      return socket.emit('err', 'XI mein kam se kam 1 wicket-keeper chahiye!');
-    const impact = data.impact;
-    if (!squadNames.includes(impact))
-      return socket.emit('err', 'Impact player aapki squad se hona chahiye!');
-    if (xi.includes(impact))
-      return socket.emit('err', 'Impact player XI se bahar hona chahiye!');
-    const impP = m.squad.find((p) => p.name === impact);
-    const score =
-      xiP.reduce((s, p) => s + p.rating, 0) +
-      Math.round(impP.rating / 2) +
-      Math.round(m.purse);
-    m.xi = { xi, impact, score };
-    const allDone = Object.values(room.members).every(
-      (mm) => mm.xi || mm.squad.length < 11
-    );
-    if (allDone) {
-      room.results = Object.values(room.members)
-        .filter((mm) => mm.xi)
-        .map((mm) => ({
-          name: mm.name,
-          score: mm.xi.score,
-          xi: mm.xi.xi,
-          impact: mm.xi.impact,
-        }))
-        .sort((a, b) => b.score - a.score);
-      room.phase = 'results';
-    }
-    broadcast(room);
-  });
-
-  socket.on('disconnect', () => {
-    const room = rooms[socket.room];
-    if (!room) return;
-    if (room.phase === 'lobby') {
-      delete room.members[socket.id];
-      if (Object.keys(room.members).length === 0) delete rooms[room.code];
-      else {
-        if (room.host === socket.id) room.host = Object.keys(room.members)[0];
-        broadcast(room);
+setInterval(function () {
+  try {
+    const codes = Object.keys(rooms);
+    for (let i = 0; i < codes.length; i++) {
+      const room = rooms[codes[i]];
+      if (!room) continue;
+      if (room.phase === 'auction') {
+        room.timeLeft -= 1;
+        if (room.timeLeft <= 0) {
+          if (room.bidder) {
+            room.phase = 'rtm';
+            room.rtmWindow = {
+              timeLeft: 10,
+              playerName: room.current.name,
+              buyerId: room.bidder,
+              buyerName: room.bidderName,
+              amount: room.bid.amount,
+              rtmBuyer: null,
+              rtmBuyerId: null,
+              player: room.current
+            };
+            broadcast(room);
+          } else {
+            room.soldLog.push({ name: room.current.name, team: 'UNSOLD', amount: 0 });
+            present(room);
+          }
+        } else {
+          broadcast(room);
+        }
+      } else if (room.phase === 'rtm' && room.rtmWindow) {
+        room.rtmWindow.timeLeft -= 1;
+        if (room.rtmWindow.timeLeft <= 0) finalizeSale(room);
+        else broadcast(room);
       }
     }
+  } catch (e) {
+    console.error('TICKER ERROR:', e);
+  }
+}, 1000);
+
+function computeResults(room) {
+  const res = [];
+  for (let i = 0; i < room.members.length; i++) {
+    const m = room.members[i];
+    if (!m.xi) continue;
+    let score = 0;
+    for (let j = 0; j < m.xi.length; j++) {
+      const p = m.squad.find(function (x) { return x.name === m.xi[j]; });
+      if (p) score += p.rating;
+    }
+    let impactName = '-';
+    if (m.impact) {
+      const ip = m.squad.find(function (x) { return x.name === m.impact; });
+      if (ip) { score += ip.rating; impactName = ip.name; }
+    }
+    res.push({ name: m.name, score: score, impact: impactName, xi: m.xi });
+  }
+  res.sort(function (a, b) { return b.score - a.score; });
+  room.results = res;
+  room.phase = 'results';
+  broadcast(room);
+}
+
+io.on('connection', function (socket) {
+
+  socket.on('create', function (d) {
+    try {
+      const name = ((d && d.name) || '').trim();
+      if (!name) { socket.emit('err', 'Pehle apna naam likho!'); return; }
+      const purse = parseInt(d && d.purse, 10) || 100;
+      const code = makeCode();
+      rooms[code] = {
+        code: code,
+        purse: purse,
+        phase: 'lobby',
+        members: [{ id: socket.id, name: name, isHost: true, purse: purse, squad: [], rtm: 2, xi: null, impact: null }],
+        soldLog: [],
+        queue: [],
+        used: {},
+        current: null,
+        bid: { amount: 0 },
+        bidder: null,
+        bidderName: null,
+        timeLeft: 15,
+        rtmWindow: null,
+        results: [],
+        host: socket.id
+      };
+      socket.room = code;
+      socket.join(code);
+      socket.emit('joined', { self: socket.id });
+      broadcast(rooms[code]);
+    } catch (e) { console.error('CREATE ERROR:', e); }
   });
+
+  socket.on('join', function (d) {
+    try {
+      const name = ((d && d.name) || '').trim();
+      const code = ((d && d.code) || '').trim().toUpperCase();
+      if (!name) { socket.emit('err', 'Pehle apna naam likho!'); return; }
+      const room = rooms[code];
+      if (!room) { socket.emit('err', 'Room nahi mila! Code check karo.'); return; }
+      if (room.phase !== 'lobby') { socket.emit('err', 'Game pehle se shuru ho chuka hai!'); return; }
+      if (room.members.length >= 10) { socket.emit('err', 'Room full hai (max 10)!'); return; }
+      room.members.push({ id: socket.id, name: name, isHost: false, purse: room.purse, squad: [], rtm: 2, xi: null, impact: null });
+      socket.room = code;
+      socket.join(code);
+      socket.emit('joined', { self: socket.id });
+      broadcast(room);
+    } catch (e) { console.error('JOIN ERROR:', e); }
+  });
+
+  socket.on('start', function () {
+    try {
+      const room = rooms[socket.room];
+      if (!room || room.host !== socket.id || room.phase !== 'lobby') return;
+      if (room.members.length < 2) { socket.emit('err', 'Kam se kam 2 players chahiye!'); return; }
+      room.phase = 'catPick';
+      broadcast(room);
+    } catch (e) { console.error('START ERROR:', e); }
+  });
+
+  socket.on('category', function (d) {
+    try {
+      const room = rooms[socket.room];
+      if (!room || room.host !== socket.id) return;
+      if (room.phase !== 'catPick' && room.phase !== 'catEnd') return;
+      const role = (d && d.role) || 'ALL';
+      const over = (d && d.over) || 'ALL';
+      let list = PLAYERS.filter(function (p) { return role === 'ALL' || p.role === role; });
+      list = list.filter(function (p) {
+        if (over === 'IND') return !p.overseas;
+        if (over === 'OVER') return !!p.overseas;
+        return true;
+      });
+      list = list.filter(function (p) { return !room.used[p.name]; });
+      if (list.length === 0) { socket.emit('err', 'Is category mein koi player nahi bacha!'); return; }
+      room.queue = shuffle(list);
+      present(room);
+    } catch (e) { console.error('CATEGORY ERROR:', e); }
+  });
+
+  socket.on('bid', function () {
+    try {
+      const room = rooms[socket.room];
+      if (!room || room.phase !== 'auction') return;
+      const m = findMember(room, socket.id);
+      if (!m) return;
+      const next = Math.round((room.bid.amount + 0.25) * 100) / 100;
+      if (m.purse < next) { socket.emit('err', 'Purse mein itne paise nahi!'); return; }
+      if (m.squad.length >= 25) { socket.emit('err', 'Squad full (25)!'); return; }
+      room.bid.amount = next;
+      room.bidder = m.id;
+      room.bidderName = m.name;
+      broadcast(room);
+    } catch (e) { console.error('BID ERROR:', e); }
+  });
+
+  socket.on('rtm', function () {
+    try {
+      const room = rooms[socket.room];
+      if (!room || room.phase !== 'rtm' || !room.rtmWindow) return;
+      const w = room.rtmWindow;
+      if (w.rtmBuyerId) return;
+      const m = findMember(room, socket.id);
+      if (!m || m.id === w.buyerId) return;
+      if (m.rtm <= 0 || m.purse < w.amount || m.squad.length >= 25) return;
+      m.rtm -= 1;
+      w.rtmBuyer = m.name;
+      w.rtmBuyerId = m.id;
+      finalizeSale(room);
+    } catch (e) { console.error('RTM ERROR:', e); }
+  });
+
+  socket.on('stopCat', function () {
+    try {
+      const room = rooms[socket.room];
+      if (!room || room.host !== socket.id) return;
+      if (room.phase !== 'auction' && room.phase !== 'rtm') return;
+      if (room.current && room.phase === 'auction') {
+        room.soldLog.push({ name: room.current.name, team: 'UNSOLD', amount: 0 });
+      }
+      room.rtmWindow = null;
+      room.current = null;
+      room.queue = [];
+      room.bid = { amount: 0 };
+      room.bidder = null;
+      room.bidderName = null;
+      room.phase = 'catEnd';
+      broadcast(room);
+    } catch (e) { console.error('STOPCAT ERROR:', e); }
+  });
+
+  socket.on('endAuction', function () {
+    try {
+      const room = rooms[socket.room];
+      if (!room || room.host !== socket.id) return;
+      if (room.phase === 'xi' || room.phase === 'results') return;
+      if (room.current && (room.phase === 'auction' || room.phase === 'rtm')) {
+        room.soldLog.push({ name: room.current.name, team: 'UNSOLD', amount: 0 });
+      }
+      room.rtmWindow = null;
+      room.current = null;
+      room.queue = [];
+      room.phase = 'xi';
+      broadcast(room);
+    } catch (e) { console.error('ENDAUCTION ERROR:', e); }
+  });
+
+  socket.on('xi', function (d) {
+    try {
+      const room = rooms[socket.room];
+      if (!room || room.phase !== 'xi') return;
+      const m = findMember(room, socket.id);
+      if (!m || m.xi) return;
+      if (m.squad.length < 11) { socket.emit('err', 'Aapke paas 11 players nahi hain!'); return; }
+      const names = (d && d.xi) || [];
+      if (names.length !== 11) { socket.emit('err', 'Exactly 11 players chuno!'); return; }
+      const set = {};
+      for (let i = 0; i < names.length; i++) {
+        if (set[names[i]]) { socket.emit('err', 'Ek player do baar nahi!'); return; }
+        set[names[i]] = true;
+        if (!m.squad.some(function (p) { return p.name === names[i]; })) {
+          socket.emit('err', 'Squad se bahar ka player!'); return;
+        }
+      }
+      let ov = 0;
+      for (let i = 0; i < names.length; i++) {
+        const p = m.squad.find(function (x) { return x.name === names[i]; });
+        if (p && p.overseas) ov++;
+      }
+      if (ov > 4) { socket.emit('err', 'XI mein max 4 overseas!'); return; }
+      let impact = (d && d.impact) || '';
+      if (impact && names.indexOf(impact) !== -1) impact = '';
+      if (impact && !m.squad.some(function (p) { return p.name === impact; })) impact = '';
+      m.xi = names;
+      m.impact = impact;
+      const eligible = room.members.filter(function (mm) { return mm.squad.length >= 11; });
+      const done = eligible.every(function (mm) { return !!mm.xi; });
+      if (done) computeResults(room);
+      else broadcast(room);
+    } catch (e) { console.error('XI ERROR:', e); }
+  });
+
+  socket.on('disconnect', function () {
+    try {
+      const room = rooms[socket.room];
+      if (!room) return;
+      const m = findMember(room, socket.id);
+      if (!m) return;
+      if (room.phase === 'lobby') {
+        room.members = room.members.filter(function (mm) { return mm.id !== socket.id; });
+        if (room.members.length === 0) { delete rooms[room.code]; return; }
+        if (room.host === socket.id) {
+          room.host = room.members[0].id;
+          room.members[0].isHost = true;
+        }
+        broadcast(room);
+      } else {
+        if (room.host === socket.id) {
+          const alive = room.members.find(function (mm) { return mm.id !== socket.id; });
+          if (alive) { room.host = alive.id; alive.isHost = true; }
+        }
+        broadcast(room);
+      }
+    } catch (e) { console.error('DISCONNECT ERROR:', e); }
+  });
+
 });
 
 const PORT = process.env.PORT || 3000;
-app.get('/ping', (req, res) => res.send('pong'));
-server.listen(PORT, () => console.log('Server running on port ' + PORT));
+server.listen(PORT, function () {
+  console.log('Server running on port ' + PORT);
+});
