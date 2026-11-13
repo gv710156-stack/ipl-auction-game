@@ -295,15 +295,10 @@ io.on('connection', (socket) => {
     room.bidder = null;
     room.queue = [];
     room.phase = 'xi';
-    if (Object.values(room.members).every((mm) => mm.squad.length < 11)) {
-      room.results = [];
-      room.phase = 'results';
-    }
+    
     broadcast(room);
   });
-  if (Object.values(room.members).every((mm) => mm.squad.length < 11)) {
-    room.results = [];
-    room.phase = 'results';
+  
   }
 
   socket.on('xi', (data) => {
