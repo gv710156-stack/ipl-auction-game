@@ -190,6 +190,13 @@
       const socket = io();
       setInterval(function () { fetch('/ping').catch(function () {}); }, 240000);
       socket.on('reconnect', function () { location.reload(); });
+      setInterval(function() {
+  const timerEl = document.querySelector('.timer-display');
+  if (timerEl && room && room.phase === 'auction') {
+    let t = parseInt(timerEl.textContent);
+    if (t > 0) timerEl.textContent = (t - 1) + 's';
+  }
+}, 1000);
       let selfId = null,
         room = null,
         view = 'home';
